@@ -59,7 +59,8 @@ test('supported sources auto-extract with generic fallback disabled and proxies 
   assert.deepEqual(args.slice(args.indexOf('--ies'), args.indexOf('--ies') + 2), ['--ies', 'default,-generic']);
   assert.ok(args.includes('--ignore-config'));
   assert.ok(args.includes('--no-playlist'));
-  assert.ok(options.timeout <= 30000);
+  assert.deepEqual(args.slice(args.indexOf('--js-runtimes'), args.indexOf('--js-runtimes') + 2), ['--js-runtimes', 'node']);
+  assert.ok(options.timeout <= 45000);
 });
 
 test('yt-dlp cannot hand ffmpeg an internal stream or a redirect target it exposes', async () => {
@@ -77,5 +78,26 @@ test('yt-dlp cannot hand ffmpeg an internal stream or a redirect target it expos
 test('unsupported website returns a useful, non-sensitive error', async () => {
   await assert.rejects(resolveMediaInput('https://unknown.example.org/some/page', {
     lookup: dns, run: async () => { throw { code: 1, stderr: 'private provider detail and cookie' }; }
-  }), /yt-dlp không hỗ trợ/);
+  }), /yt-dlp không thể trích xuất/);
+});
+
+
+test('YouTube Radio URL extracts only the requested video', async () => {
+  let args;
+  await resolveMediaInput('https://www.youtube.com/watch?v=hO4X_mJSqPI&list=RDhO4X_mJSqPI&start_radio=1', {
+    lookup: dns, run: async (_exe, argv) => {
+      args = argv;
+      return { stdout: 'https://stream.example.org/music.m3u8\n' };
+    }
+  });
+  assert.equal(args.at(-1), 'https://www.youtube.com/watch?v=hO4X_mJSqPI');
+});
+
+test('yt-dlp actionable error messages do not echo secrets or raw stderr', async () => {
+  await assert.rejects(resolveMediaInput('https://www.youtube.com/watch?v=hO4X_mJSqPI', {
+    lookup: dns, run: async () => { throw { stderr: 'WARNING: No supported JavaScript runtime was found. secret=PRIVATE' }; }
+  }), /yt-dlp-ejs/);
+  await assert.rejects(resolveMediaInput('https://www.youtube.com/watch?v=hO4X_mJSqPI', {
+    lookup: dns, run: async () => { throw { stderr: 'Sign in to confirm you are not a bot, token SECRET' }; }
+  }), /AWS/);
 });

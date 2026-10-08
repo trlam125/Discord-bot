@@ -78,9 +78,37 @@ export async function validatePublicHttpsUrl(value, lookup = dnsLookup) {
 const DIRECT_AUDIO = /\.(mp3|ogg|opus|m4a|aac|wav|flac|m3u8)$/i;
 const PROXY_ENV_RE = /^(https?_proxy|all_proxy|no_proxy)$/i;
 
+// A YouTube Radio/share URL may contain a playlist context that we do not need
+// for one-song playback. Keep only the 11-character video ID.
+function standaloneVideoUrl(validatedUrl) {
+  const input = new URL(validatedUrl);
+  if (!['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(input.hostname.toLowerCase())) return validatedUrl;
+  if (input.pathname !== '/watch') return validatedUrl;
+  const id = input.searchParams.get('v');
+  return id && /^[A-Za-z0-9_-]{11}$/.test(id)
+    ? `https://www.youtube.com/watch?v=${id}` : validatedUrl;
+}
+
+function extractionFailure(err) {
+  if (err.code === 'ENOENT') return Error('Chưa cài yt-dlp trên máy chủ.');
+  const stderr = String(err.stderr || '').toLowerCase();
+  if (/sign in to confirm|not a bot|this video is private|login required|members-only|age.restricted/.test(stderr)) {
+    return Error('YouTube yêu cầu đăng nhập hoặc xác minh truy cập từ máy chủ AWS; link này hiện không thể phát công khai.');
+  }
+  if (/javascript runtime|challenge solver|yt.dlp.ejs|ejs scripts/.test(stderr)) {
+    return Error('Thiếu JavaScript runtime hoặc bộ giải thử thách yt-dlp-ejs. Hãy cài yt-dlp[default] và kiểm tra Node.js.');
+  }
+  if (/requested format is not available|no video formats found/.test(stderr)) {
+    return Error('yt-dlp không tìm thấy luồng âm thanh có thể phát từ nguồn này.');
+  }
+  if (err.killed || err.signal === 'SIGKILL') return Error('yt-dlp xử lý quá lâu và bị dừng (timeout).');
+  return Error('yt-dlp không thể trích xuất link. Chạy yt-dlp trực tiếp trên EC2 để xem lỗi gốc (có thể do mạng, hạn chế YouTube hoặc nguồn không hỗ trợ).');
+}
+
 export async function resolveMediaInput(raw, { lookup = dnsLookup, run = execFileAsync } = {}) {
   const url = await validatePublicHttpsUrl(raw, lookup);
   if (DIRECT_AUDIO.test(new URL(url).pathname)) return url;
+  const extractorUrl = await validatePublicHttpsUrl(standaloneVideoUrl(url), lookup);
 
   // Use site-specific extractors for popular public sites; refuse the generic
   // scraper, which otherwise accepts arbitrary websites, including intranet.
@@ -89,12 +117,11 @@ export async function resolveMediaInput(raw, { lookup = dnsLookup, run = execFil
   try {
     ({ stdout } = await run('yt-dlp', [
       '--ignore-config', '--no-playlist', '--no-warnings',
-      '--ies', 'default,-generic', '--proxy', '',
-      '-f', 'bestaudio/best', '--get-url', '--', url
-    ], { timeout: 30000, maxBuffer: 65536, killSignal: 'SIGKILL', env: childEnv }));
+      '--ies', 'default,-generic', '--js-runtimes', 'node', '--proxy', '',
+      '-f', 'bestaudio/best', '--get-url', '--', extractorUrl
+    ], { timeout: 45000, maxBuffer: 65536, killSignal: 'SIGKILL', env: childEnv }));
   } catch (e) {
-    if (e.code === 'ENOENT') throw Error('Chưa cài yt-dlp trên máy chủ.');
-    throw Error('yt-dlp không hỗ trợ hoặc không thể truy cập link này (không hỗ trợ DRM/private/login).');
+    throw extractionFailure(e);
   }
   const links = String(stdout).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   if (links.length !== 1) throw Error('Không tìm thấy đúng một luồng âm thanh công khai.');
