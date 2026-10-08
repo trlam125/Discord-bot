@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Neu da tao Worker tu truoc, dat "name" DUNG bang ten Worker tren Cloudflare.
+  "name": "Lam's bot",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  // Nhac su kien moi phut; quan ly Cron tai day, khong can tao thu cong.
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "discord-bot",
+      // TAO D1 TRUOC KHI DEPLOY; thay bang UUID D1 thuc te trong Cloudflare.
+      "database_id": "d158d7bf-1f88-4bbb-aaac-c43c117cde68"
+    }
+  ]
+}
