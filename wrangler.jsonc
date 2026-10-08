@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   // Neu da tao Worker tu truoc, dat "name" DUNG bang ten Worker tren Cloudflare.
-  "name": "Lam's bot",
+  "name": "lam's bot",
   "main": "src/index.js",
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
