@@ -328,23 +328,16 @@ function memberAvatarUrl(guild, userId, member) {
   return `https://cdn.discordapp.com/guilds/${guild}/users/${userId}/avatars/${member.avatar}.${member.avatar.startsWith('a_') ? 'gif' : 'png'}?size=1024`;
 }
 
-async function userInfo(interaction, env) {
-  const selectedId = String(option(interaction, 'user')?.value || requestUserId(interaction));
-  const partial = interaction.data?.resolved || {};
-  let user = partial.users?.[selectedId] || (selectedId === requestUserId(interaction) ?
-    interaction.member?.user || interaction.user : null);
-  let member = partial.members?.[selectedId] || (selectedId === requestUserId(interaction) ? interaction.member : null);
-  try {
-    if (!user) user = await discordRequest(`/users/${selectedId}`, env.DISCORD_BOT_TOKEN);
-    // The Discord user endpoint can include the banner missing from resolved user objects.
-    const [fullUser, fullMember] = await Promise.all([
-      discordRequest(`/users/${selectedId}`, env.DISCORD_BOT_TOKEN).catch(() => user),
-      discordRequest(`/guilds/${interaction.guild_id}/members/${selectedId}`, env.DISCORD_BOT_TOKEN).catch(() => member)
-    ]);
-    user = fullUser || user;
-    member = fullMember || member;
-  } catch (e) { console.warn('Discord user lookup:', e?.message); }
-  if (!user) return { content: 'Không đọc được thông tin người dùng. Kiểm tra Bot Token.' };
+// Discord includes the invoking member and resolved USER option in the interaction.
+// Replying synchronously avoids a second Discord API request that can time out
+// or fail from Cloudflare Workers before the interaction is completed.
+function userInfo(interaction) {
+  const selectedId = String(option(interaction, 'user')?.value || requestUserId(interaction) || '');
+  const resolved = interaction.data?.resolved || {};
+  const isSelf = selectedId === requestUserId(interaction);
+  const user = resolved.users?.[selectedId] || (isSelf ? interaction.member?.user || interaction.user : null);
+  const member = resolved.members?.[selectedId] || (isSelf ? interaction.member : null);
+  if (!user?.id) return { content: 'Discord không gửi đủ thông tin tài khoản. Hãy thử chọn lại thành viên.', flags: 64 };
   const av = avatarUrl(user);
   const serverAv = memberAvatarUrl(interaction.guild_id, user.id, member);
   const banner = user.banner ? `https://cdn.discordapp.com/banners/${user.id}/${user.banner}.${user.banner.startsWith('a_') ? 'gif' : 'png'}?size=1024` : null;
@@ -366,14 +359,12 @@ async function userInfo(interaction, env) {
     e.fields.push(field('Vào server', member?.joined_at ? discordTime(Date.parse(member.joined_at)) : 'Không rõ', true));
     if (member?.premium_since) e.fields.push(field('Boost server', discordTime(Date.parse(member.premium_since)), true));
     if (Array.isArray(member?.roles) && member.roles.length) {
-      let roles = member.roles.map(x => `<@&${x}>`);
-      try {
-        const data = await discordRequest(`/guilds/${interaction.guild_id}/roles`, env.DISCORD_BOT_TOKEN);
-        const byId = new Map(data.map(x => [x.id, x]));
-        roles = member.roles.map(id => byId.get(id)).filter(Boolean).sort((a, b) => b.position - a.position)
-          .map(x => x.name);
-      } catch (e) { console.warn('Roles lookup:', e?.message); }
-      e.fields.push(field(`Roles (${member.roles.length})`, roles.join(', '), false, 900));
+      // Resolved role details are optional; use Discord mentions as a fallback.
+      const roleNames = member.roles.map(id => {
+        const role = resolved.roles?.[id];
+        return role?.name ? clamp(role.name, 90) : `<@&${id}>`;
+      });
+      e.fields.push(field(`Roles (${member.roles.length})`, roleNames.join(', '), false, 900));
     }
   }
   return { embeds: [e], components: [{ type: 1, components: buttons }], allowed_mentions: EMPTY_MENTIONS };
@@ -508,14 +499,8 @@ async function handleCommand(interaction, env, ctx) {
   }
   if (command === 'member' || command === 'avatar') {
     if (!interaction.guild_id) return reply('Lệnh chỉ dùng trong server Discord.', true);
-    ctx.waitUntil((async () => {
-      try { await editOriginal(interaction, await userInfo(interaction, env)); }
-      catch (e) {
-        console.error('Member error:', e);
-        try { await editOriginal(interaction, { content: 'Không tải được thông tin thành viên.' }); } catch {}
-      }
-    })());
-    return json({ type: 5 });
+    // No outbound Discord API or deferred webhook: respond in the initial 3-second window.
+    return json({ type: 4, data: userInfo(interaction) });
   }
   if (command === 'remind') return reminderCommand(interaction, env);
   if (command === 'help') return reply(

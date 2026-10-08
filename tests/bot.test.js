@@ -236,31 +236,73 @@ test('Steam search by partial name displays select menu and selection loads game
   } finally { globalThis.fetch = oldFetch; }
 });
 
-test('member info shows server joined date, avatar links, and role name', async () => {
+test('member responds immediately from Discord interaction payload without fetching API', async () => {
   const keys = await fixture();
   const oldFetch = globalThis.fetch;
-  const edited = [];
-  globalThis.fetch = async (url, options = {}) => {
-    const u = String(url);
-    if (u.includes('/users/1000000000000000000') && !u.includes('/guilds/'))
-      return Response.json({ id: '1000000000000000000', username: 'tester', global_name: 'Test User', avatar: 'a_1234', banner: null });
-    if (u.includes('/members/1000000000000000000'))
-      return Response.json({ nick: 'TestNickname', avatar: '2345', roles: ['2'], joined_at: '2025-03-04T09:00:00Z' });
-    if (u.endsWith('/roles')) return Response.json([{ id: '2', name: 'Moderator', position: 10 }]);
-    if (u.includes('/webhooks/')) { edited.push(JSON.parse(options.body)); return Response.json({}); }
-    throw Error('Unmocked request ' + u);
-  };
+  globalThis.fetch = async () => { throw Error('Unexpected Discord API or webhook request'); };
   try {
     const ctx = makeContext();
     const interaction = sample(2, 'member');
-    const ack = await worker.fetch(await sign(interaction, keys.privateKey), { DISCORD_PUBLIC_KEY: keys.pubHex, DISCORD_BOT_TOKEN: 'fake' }, ctx.ctx);
-    assert.equal((await ack.json()).type, 5);
-    await Promise.all(ctx.pending);
-    const e = edited[0].embeds[0];
-    assert.ok(e.fields.some(x => x.name === 'Roles (1)' && x.value === 'Moderator'));
-    assert.ok(e.fields.some(x => x.value === 'TestNickname'));
-    assert.ok(e.thumbnail.url.includes('/guilds/'));
+    interaction.data.resolved = { roles: { '2': { id: '2', name: 'Moderator' } } };
+    const response = await worker.fetch(await sign(interaction, keys.privateKey),
+      { DISCORD_PUBLIC_KEY: keys.pubHex }, ctx.ctx);
+    const payload = await response.json();
+    assert.equal(payload.type, 4);
+    assert.equal(ctx.pending.length, 0);
+    const embed = payload.data.embeds[0];
+    assert.ok(embed.fields.some(x => x.name === 'Roles (1)' && x.value === 'Moderator'));
+    assert.ok(embed.fields.some(x => x.value === '1000000000000000000'));
+    assert.equal(embed.thumbnail.url, __test.avatarUrl(interaction.member.user));
   } finally { globalThis.fetch = oldFetch; }
+});
+
+test('avatar for self responds with type 4 instantly and does not need Bot Token', async () => {
+  const keys = await fixture();
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw Error('Unexpected external fetch'); };
+  try {
+    const ctx = makeContext();
+    const interaction = sample(2, 'avatar');
+    interaction.member.avatar = 'guild-avatar';
+    const response = await worker.fetch(await sign(interaction, keys.privateKey),
+      { DISCORD_PUBLIC_KEY: keys.pubHex }, ctx.ctx);
+    const payload = await response.json();
+    assert.equal(payload.type, 4);
+    assert.equal(ctx.pending.length, 0);
+    assert.match(payload.data.embeds[0].image.url, /guilds\/1200000000000000000\/users\/1000000000000000000\/avatars\/guild-avatar/);
+    assert.equal(payload.data.components[0].components.length, 2);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('avatar for a selected member uses resolved data without Bot Token or outbound API', async () => {
+  const keys = await fixture();
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw Error('Unexpected external fetch'); };
+  try {
+    const selectedId = '999999999999999999';
+    const interaction = sample(2, 'avatar', [{ name: 'user', type: 6, value: selectedId }]);
+    interaction.data.resolved = {
+      users: { [selectedId]: { id: selectedId, username: 'friend', global_name: 'A Friend', avatar: 'abcd' } },
+      members: { [selectedId]: { nick: 'Nickname', avatar: null, roles: [], joined_at: '2026-01-01T00:00:00Z' } }
+    };
+    const response = await worker.fetch(await sign(interaction, keys.privateKey),
+      { DISCORD_PUBLIC_KEY: keys.pubHex }, makeContext().ctx);
+    const payload = await response.json();
+    assert.equal(payload.type, 4);
+    assert.equal(payload.data.embeds[0].title, 'Avatar: A Friend');
+    assert.match(payload.data.embeds[0].image.url, /999999999999999999\/abcd.png/);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('missing resolved user returns immediate visible error', async () => {
+  const keys = await fixture();
+  const interaction = sample(2, 'avatar', [{ name: 'user', value: '999999999999999999' }]);
+  const response = await worker.fetch(await sign(interaction, keys.privateKey),
+    { DISCORD_PUBLIC_KEY: keys.pubHex }, makeContext().ctx);
+  const payload = await response.json();
+  assert.equal(payload.type, 4);
+  assert.equal(payload.data.flags, 64);
+  assert.match(payload.data.content, /không gửi đủ/);
 });
 
 test('reminder list/cancel restrict ownership', async () => {
