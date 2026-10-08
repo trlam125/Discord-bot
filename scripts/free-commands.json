@@ -1,0 +1,46 @@
+{
+  "name": "free",
+  "description": "Game mien phi co thoi han: xem, loc va thong bao tu dong",
+  "type": 1,
+  "options": [
+    { "type": 1, "name": "now", "description": "Xem game dang duoc tang mien phi", "options": [
+      { "type": 3, "name": "store", "description": "Loc theo cua hang", "required": false, "choices": [
+        { "name": "Tat ca", "value": "all" }, { "name": "Steam", "value": "steam" }, { "name": "Epic Games", "value": "epic" }, { "name": "GOG", "value": "gog" }, { "name": "itch.io", "value": "itch" }, { "name": "Khac", "value": "other" }
+      ] }
+    ] },
+    { "type": 1, "name": "upcoming", "description": "Xem game Epic sap duoc tang" },
+    { "type": 1, "name": "search", "description": "Tim game mien phi theo ten", "options": [
+      { "type": 3, "name": "query", "description": "Ten game can tim", "required": true, "max_length": 100 },
+      { "type": 3, "name": "store", "description": "Cua hang", "required": false, "choices": [
+        { "name": "Steam", "value": "steam" }, { "name": "Epic Games", "value": "epic" }, { "name": "GOG", "value": "gog" }, { "name": "itch.io", "value": "itch" }, { "name": "Khac", "value": "other" }
+      ] }
+    ] },
+    { "type": 1, "name": "status", "description": "Xem trang thai va bo loc thong bao" },
+    { "type": 1, "name": "help", "description": "Huong dan tat ca lenh free games" },
+    { "type": 1, "name": "setup", "description": "Quan tri: chon kenh nhan thong bao", "options": [
+      { "type": 7, "name": "channel", "description": "Kenh gui thong bao", "required": true, "channel_types": [0, 5] },
+      { "type": 8, "name": "role", "description": "Role se nhan ping (tuy chon)", "required": false }
+    ] },
+    { "type": 1, "name": "filter", "description": "Quan tri: loc cua hang, loai va gia", "options": [
+      { "type": 3, "name": "stores", "description": "Vi du: steam,epic,gog,itch,other hoac all", "required": false, "max_length": 80 },
+      { "type": 3, "name": "kinds", "description": "game,loot,beta hoac all", "required": false, "max_length": 40 },
+      { "type": 10, "name": "min_price", "description": "Gia goc toi thieu (USD; mac dinh > 0)", "required": false, "min_value": 0, "max_value": 10000 },
+      { "type": 5, "name": "upcoming", "description": "Bao ca game sap mien phi (Epic)", "required": false }
+    ] },
+    { "type": 1, "name": "theme", "description": "Quan tri: doi kieu thong bao", "options": [
+      { "type": 3, "name": "style", "description": "Giao dien", "required": true, "choices": [
+        { "name": "Rich: anh, mo ta, thoi gian", "value": "rich" },
+        { "name": "Compact: ngan gon", "value": "compact" }
+      ] }
+    ] },
+    { "type": 1, "name": "mention", "description": "Quan tri: chon role duoc ping", "options": [
+      { "type": 8, "name": "role", "description": "Role duoc ping", "required": false },
+      { "type": 5, "name": "clear", "description": "Bo ping role", "required": false }
+    ] },
+    { "type": 1, "name": "toggle", "description": "Quan tri: bat hoac tat thong bao", "options": [
+      { "type": 5, "name": "enabled", "description": "Bat thong bao?", "required": true }
+    ] },
+    { "type": 1, "name": "test", "description": "Quan tri: gui tin thu vao kenh da chon" },
+    { "type": 1, "name": "refresh", "description": "Quan tri: cap nhat nguon game ngay" }
+  ]
+}

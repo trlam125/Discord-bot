@@ -10,6 +10,7 @@ import { parsePublicHttpsUrl, resolveMediaInput } from './media-url.js';
 import { fallbackConfigured, resolveFallbackMedia } from './fallback-provider.js';
 import { prepareAudioStream } from './ffmpeg-audio.js';
 import { tryPrimaryThenFallback } from './two-stage.js';
+import { publicVoiceError, voiceQueueSummary } from './public-messages.js';
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import {
   joinVoiceChannel, createAudioPlayer, createAudioResource,
@@ -61,7 +62,7 @@ function activeTrack(session, item, generation) {
 function finishFailedTrack(session, item, generation, error) {
   if (!activeTrack(session, item, generation)) return;
   console.warn(`Voice track failed (${error?.message || 'unknown error'})`);
-  void say(item.channel_id, `Không phát được link: ${error?.message || 'Nguồn không khả dụng.'}`);
+  void say(item.channel_id, 'Không phát được bài này.');
   session.transitioning = true;
   session.current = null;
   session.controller?.abort();
@@ -105,9 +106,11 @@ async function startSource(session, item, generation, mode) {
       }
     }
   });
-  await say(item.channel_id, mode === 'direct'
-    ? `Đang phát (nguồn trực tiếp): ${item.url}`
-    : `Đang phát (nguồn trung gian): ${item.url}`);
+  // Only notify once per track, including when direct playback switches to fallback.
+  if (session.notifiedGeneration !== generation) {
+    session.notifiedGeneration = generation;
+    await say(item.channel_id, 'Đang phát nhạc.');
+  }
   return true;
 }
 
@@ -116,7 +119,7 @@ async function switchToFallback(session, item, generation) {
   session.transitioning = true; // Prevent Idle from removing this song during retry.
   terminateFfmpeg(session);
   session.player.stop(true);
-  await say(item.channel_id, 'Nguồn trực tiếp lỗi, đang thử nguồn trung gian...');
+  // A fallback is an internal detail, not another channel notification.
   if (!activeTrack(session, item, generation)) return;
   try {
     await startSource(session, item, generation, 'fallback');
@@ -156,7 +159,7 @@ async function newSession(guild, voiceChannelId) {
   catch (e) { connection.destroy(); throw Error(`Unable to join voice channel: ${e.message}`); }
   const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
   connection.subscribe(player);
-  const session = { connection, player, voiceChannelId, queue: [], current: null, ffmpeg: null, generation: 0, transitioning: false, controller: null };
+  const session = { connection, player, voiceChannelId, queue: [], current: null, ffmpeg: null, generation: 0, notifiedGeneration: -1, transitioning: false, controller: null };
   const completeTrack = () => {
     if (session.transitioning || !session.current) return;
     session.current = null;
@@ -211,9 +214,7 @@ async function executeJob(job) {
     throw Error('Bot chưa phát nhạc trong server này');
   }
   if (job.action === 'queue') {
-    const lines = [session.current?.url ? `Đang phát: ${session.current.url}` : 'Không có bài đang phát',
-      ...session.queue.map((x, i) => `${i + 1}. ${x.url}`)];
-    return say(job.channel_id, lines.join('\n'));
+    return say(job.channel_id, voiceQueueSummary(session));
   }
   // Control playback only for members in the SAME voice room.
   if (!userVoice || userVoice !== session.voiceChannelId) throw Error('Bạn cần ở cùng phòng thoại với bot để điều khiển');
@@ -262,7 +263,7 @@ async function poll() {
         ok = false;
         error = e.message || String(e);
         console.error(`Voice job ${job.id}:`, error);
-        await say(job.channel_id, `Không thực hiện được /${job.action}: ${error}`);
+        await say(job.channel_id, publicVoiceError(e));
       }
     }
     // Remember exact result if ACK fails, preventing a second playback in this process.

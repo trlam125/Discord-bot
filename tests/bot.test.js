@@ -196,7 +196,30 @@ test('D1 reminder creation and scheduled dispatch via Discord REST', async () =>
     assert.equal(env.DB.rows[0].status, 'sent');
     assert.equal(messages.length, 1);
     assert.match(messages[0].content, /Lan party/);
+    assert.match(messages[0].content, /<t:\d+:f>/);
+    assert.ok(!messages[0].content.includes('Thời gian đã đặt'));
     assert.deepEqual(messages[0].allowed_mentions.users, ['1000000000000000000']);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('public reminders escape formatting and keep the event title short', async () => {
+  const keys = await fixture();
+  const env = { DISCORD_PUBLIC_KEY: keys.pubHex, DISCORD_BOT_TOKEN: 'test-bot-token', DB: fakeDatabase() };
+  const title = '*Secret* ' + 'x'.repeat(145);
+  const reminder = sample(2, 'remind', [{ name: 'create', options: [
+    { name: 'event', value: title }, { name: 'when', value: '2m' }
+  ] }]);
+  await worker.fetch(await sign(reminder, keys.privateKey), env, makeContext().ctx);
+  let delivered;
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    delivered = JSON.parse(options.body);
+    return Response.json({ id: '1234' });
+  };
+  try {
+    await __test.processReminders(env, env.DB.rows[0].due_at + 1000);
+    assert.match(delivered.content, /\\\*Secret\\\*/);
+    assert.ok(delivered.content.length < 160);
   } finally { globalThis.fetch = oldFetch; }
 });
 
@@ -243,6 +266,7 @@ test('member responds immediately from Discord interaction payload without fetch
   try {
     const ctx = makeContext();
     const interaction = sample(2, 'member');
+    interaction.member.premium_since = '2025-07-11T08:00:00Z';
     interaction.data.resolved = { roles: { '2': { id: '2', name: 'Moderator' } } };
     const response = await worker.fetch(await sign(interaction, keys.privateKey),
       { DISCORD_PUBLIC_KEY: keys.pubHex }, ctx.ctx);
@@ -250,10 +274,69 @@ test('member responds immediately from Discord interaction payload without fetch
     assert.equal(payload.type, 4);
     assert.equal(ctx.pending.length, 0);
     const embed = payload.data.embeds[0];
-    assert.ok(embed.fields.some(x => x.name === 'Roles (1)' && x.value === 'Moderator'));
-    assert.ok(embed.fields.some(x => x.value === '1000000000000000000'));
+    assert.equal(payload.data.flags, 64); // /member is visible only to the requester.
+    assert.deepEqual(embed.fields.map(x => x.name), [
+      'Tên tài khoản', 'Tên hiển thị', 'Tạo tài khoản', 'Tham gia server', 'Boost server', 'Vai trò'
+    ]);
+    assert.match(embed.fields[2].value, /^<t:\d+:D>$/);
+    assert.equal(embed.fields[3].value, `<t:${Date.parse('2025-03-04T09:00:00Z') / 1000}:D>`);
+    assert.equal(embed.fields[4].value, `Từ <t:${Date.parse('2025-07-11T08:00:00Z') / 1000}:D>`);
+    assert.ok(!JSON.stringify(embed).includes('1000000000000000000'));
+    assert.equal(embed.fields[5].value, '<@&2>');
+    assert.deepEqual(payload.data.allowed_mentions, { parse: [] });
+    assert.ok(!JSON.stringify(embed).includes('2025-03-04'));
     assert.equal(embed.thumbnail.url, __test.avatarUrl(interaction.member.user));
   } finally { globalThis.fetch = oldFetch; }
+});
+
+test('member reports no boost and handles missing join or boost data honestly', async () => {
+  const keys = await fixture();
+  const interaction = sample(2, 'member');
+  interaction.member.premium_since = null;
+  const call = async () => {
+    const response = await worker.fetch(await sign(interaction, keys.privateKey),
+      { DISCORD_PUBLIC_KEY: keys.pubHex }, makeContext().ctx);
+    return (await response.json()).data;
+  };
+  const currentMember = await call();
+  assert.equal(currentMember.flags, 64);
+  assert.equal(currentMember.embeds[0].fields[4].value, 'Chưa Boost');
+  delete interaction.member.premium_since;
+  delete interaction.member.joined_at;
+  const missingDetails = await call();
+  assert.equal(missingDetails.embeds[0].fields[3].value, 'Không rõ');
+  assert.equal(missingDetails.embeds[0].fields[4].value, 'Không rõ');
+});
+
+test('member roles omit @everyone, de-duplicate, and limit very long lists', async () => {
+  const keys = await fixture();
+  const interaction = sample(2, 'member');
+  interaction.member.roles = [interaction.guild_id, '2', '2', ...Array.from({ length: 20 }, (_, i) => String(i + 10))];
+  const response = await worker.fetch(await sign(interaction, keys.privateKey),
+    { DISCORD_PUBLIC_KEY: keys.pubHex }, makeContext().ctx);
+  const payload = (await response.json()).data;
+  const roles = payload.embeds[0].fields.find(x => x.name === 'Vai trò');
+  assert.equal(payload.flags, 64);
+  assert.ok(!roles.value.includes(interaction.guild_id));
+  assert.ok(roles.value.startsWith('<@&2> <@&10>'));
+  assert.equal((roles.value.match(/<@&2>/g) || []).length, 1);
+  assert.match(roles.value, /\(\+9 vai trò khác\)$/);
+  assert.ok(roles.value.length <= 1024);
+  assert.deepEqual(payload.allowed_mentions, { parse: [] });
+});
+
+test('member role field distinguishes no roles from unavailable data', async () => {
+  const keys = await fixture();
+  const interaction = sample(2, 'member');
+  const call = async () => {
+    const response = await worker.fetch(await sign(interaction, keys.privateKey),
+      { DISCORD_PUBLIC_KEY: keys.pubHex }, makeContext().ctx);
+    return (await response.json()).data.embeds[0].fields.find(x => x.name === 'Vai trò').value;
+  };
+  interaction.member.roles = [];
+  assert.equal(await call(), 'Không có vai trò riêng');
+  delete interaction.member.roles;
+  assert.equal(await call(), 'Không rõ');
 });
 
 test('avatar for self responds with type 4 instantly and does not need Bot Token', async () => {
@@ -380,7 +463,7 @@ test('voice slash command queues job, polls securely and acknowledges completion
   const interaction = sample(2,'play',[{name:'url',type:3,value:'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'}]);
   let res = await worker.fetch(await sign(interaction,keys.privateKey), env,ctx);
   assert.equal(res.status,200);
-  assert.match((await res.json()).data.content,/Đã nhận yêu cầu/);
+  assert.match((await res.json()).data.content,/Đã nhận lệnh/);
   assert.equal(jobs.length,1);
   assert.equal(jobs[0].status,'pending');
   res = await worker.fetch(new Request('https://example.workers.dev/voice/jobs'),env,ctx);
@@ -405,7 +488,7 @@ test('voice rejects invalid URL, no guild or missing voice service configuration
   const env = {DISCORD_PUBLIC_KEY:keys.pubHex,VOICE_SHARED_SECRET:'test-secret'};
   const res = await worker.fetch(await sign(interaction,keys.privateKey),env,ctx);
   const data = await res.json();
-  assert.match(data.data.content,/Chưa cấu hình Voice Service/);
+  assert.match(data.data.content,/Bot phát nhạc chưa sẵn sàng/);
   const fakeDB = { prepare(){ throw Error('Should not insert invalid URL'); } };
   const res2= await worker.fetch(await sign(interaction,keys.privateKey),{...env,DB:fakeDB},ctx);
   assert.match((await res2.json()).data.content,/HTTPS hợp lệ/);

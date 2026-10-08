@@ -1,3 +1,4 @@
+import { freeCommand, freeButton, freeCron } from './free-games.js';
 /**
  * Discord Steam + reminders bot for Cloudflare Workers.
  * No Gateway connection, external npm runtime dependency, or server required.
@@ -328,6 +329,18 @@ function memberAvatarUrl(guild, userId, member) {
   return `https://cdn.discordapp.com/guilds/${guild}/users/${userId}/avatars/${member.avatar}.${member.avatar.startsWith('a_') ? 'gif' : 'png'}?size=1024`;
 }
 
+function memberRoleSummary(member, guildId) {
+  if (!Array.isArray(member?.roles)) return 'Không rõ';
+  // Discord renders these as role names in the client; allowed_mentions disables pings.
+  // The @everyone role has the same ID as the guild, so omit it.
+  const roles = [...new Set(member.roles.map(String))]
+    .filter(id => /^\d{1,20}$/.test(id) && id !== String(guildId));
+  if (!roles.length) return 'Không có vai trò riêng';
+  const maxShown = 12;
+  const shown = roles.slice(0, maxShown).map(id => `<@&${id}>`).join(' ');
+  return roles.length > maxShown ? `${shown} (+${roles.length - maxShown} vai trò khác)` : shown;
+}
+
 // Discord includes the invoking member and resolved USER option in the interaction.
 // Replying synchronously avoids a second Discord API request that can time out
 // or fail from Cloudflare Workers before the interaction is completed.
@@ -340,34 +353,38 @@ function userInfo(interaction) {
   if (!user?.id) return { content: 'Discord không gửi đủ thông tin tài khoản. Hãy thử chọn lại thành viên.', flags: 64 };
   const av = avatarUrl(user);
   const serverAv = memberAvatarUrl(interaction.guild_id, user.id, member);
-  const banner = user.banner ? `https://cdn.discordapp.com/banners/${user.id}/${user.banner}.${user.banner.startsWith('a_') ? 'gif' : 'png'}?size=1024` : null;
   const isAvatar = interaction.data?.name === 'avatar';
-  const e = { title: isAvatar ? `Avatar: ${user.global_name || user.username}` : `Thành viên: ${user.global_name || user.username}`,
+  const displayName = member?.nick || user.global_name || user.username;
+  const e = {
+    title: isAvatar ? `Avatar: ${user.global_name || user.username}` : `Thành viên: ${displayName}`,
     color: user.accent_color || 0x5865f2,
-    thumbnail: isAvatar ? undefined : { url: serverAv || av },
-    image: isAvatar ? { url: serverAv || av } : (banner ? { url: banner } : undefined),
+    ...(isAvatar ? { image: { url: serverAv || av } } : { thumbnail: { url: serverAv || av } }),
     fields: []
   };
   const buttons = [{ type: 2, style: 5, label: 'Avatar', url: av }];
   if (serverAv) buttons.push({ type: 2, style: 5, label: 'Server Avatar', url: serverAv });
-  if (banner) buttons.push({ type: 2, style: 5, label: 'Banner', url: banner });
   if (!isAvatar) {
+    // Keep /member concise and private: identity, dates, current Boost, and roles.
+    // Discord's interaction payload only carries the most recent server join date,
+    // not a complete history of leaving and rejoining the server.
+    const joinedAt = member?.joined_at ? Date.parse(member.joined_at) : NaN;
+    const boostAt = member?.premium_since ? Date.parse(member.premium_since) : NaN;
+    const boostStatus = member?.premium_since == null
+      ? (member && 'premium_since' in member ? 'Chưa Boost' : 'Không rõ')
+      : (Number.isFinite(boostAt) ? `Từ ${discordTime(boostAt, 'D')}` : 'Không rõ');
     e.fields.push(field('Tên tài khoản', user.username, true));
-    e.fields.push(field('Tên hiển thị', member?.nick || user.global_name || user.username, true));
-    e.fields.push(field('Discord ID', user.id, false));
-    e.fields.push(field('Tạo tài khoản', discordTime(snowflakeDate(user.id)), true));
-    e.fields.push(field('Vào server', member?.joined_at ? discordTime(Date.parse(member.joined_at)) : 'Không rõ', true));
-    if (member?.premium_since) e.fields.push(field('Boost server', discordTime(Date.parse(member.premium_since)), true));
-    if (Array.isArray(member?.roles) && member.roles.length) {
-      // Resolved role details are optional; use Discord mentions as a fallback.
-      const roleNames = member.roles.map(id => {
-        const role = resolved.roles?.[id];
-        return role?.name ? clamp(role.name, 90) : `<@&${id}>`;
-      });
-      e.fields.push(field(`Roles (${member.roles.length})`, roleNames.join(', '), false, 900));
-    }
+    e.fields.push(field('Tên hiển thị', displayName, true));
+    e.fields.push(field('Tạo tài khoản', discordTime(snowflakeDate(user.id), 'D'), true));
+    e.fields.push(field('Tham gia server', discordTime(joinedAt, 'D'), true));
+    e.fields.push(field('Boost server', boostStatus, true));
+    e.fields.push(field('Vai trò', memberRoleSummary(member, interaction.guild_id)));
   }
-  return { embeds: [e], components: [{ type: 1, components: buttons }], allowed_mentions: EMPTY_MENTIONS };
+  return {
+    embeds: [e], components: [{ type: 1, components: buttons }],
+    allowed_mentions: EMPTY_MENTIONS,
+    // /member contains personal details; show only to the requesting member.
+    ...(isAvatar ? {} : { flags: 64 })
+  };
 }
 
 /** Parse relative time 15m, 2h, 1d, 1w or Vietnam civil datetime. */
@@ -414,8 +431,7 @@ async function reminderCommand(interaction, env) {
       if ((existing?.total || 0) >= 25) return reply('Bạn chỉ được đặt tối đa 25 nhắc nhở đang hoạt động.', true);
       const inserted = await env.DB.prepare('INSERT INTO reminders (guild_id,user_id,channel_id,title,due_at,next_attempt_at,created_at) VALUES (?,?,?,?,?,?,?)')
         .bind(interaction.guild_id, owner, channel, title, dueAt, dueAt, now).run();
-      return reply(`Đã tạo nhắc nhở **#${inserted.meta.last_row_id}**: **${clamp(title, 180)}**\n` +
-        `Thời gian: ${discordTime(dueAt)} (${discordTime(dueAt, 'R')})\nKênh: <#${channel}>`, true);
+      return reply(`Đã tạo nhắc nhở #${inserted.meta.last_row_id}: ${clamp(title, 70)} — ${discordTime(dueAt, 'f')}.`, true);
     }
     if (action === 'list') {
       const data = await env.DB.prepare("SELECT id,title,due_at,status FROM reminders WHERE guild_id=? AND user_id=? AND status IN ('pending','processing','failed') ORDER BY due_at LIMIT 25")
@@ -453,8 +469,10 @@ async function processReminders(env, clock = Date.now()) {
       .bind(clock, r.id).run();
     if (!claimed.meta.changes) continue;
     try {
-      const content = `<@${r.user_id}> Nhắc nhở sự kiện: **${r.title.replace(/\*/g, '\\*')}**\n` +
-        `Thời gian đã đặt: ${discordTime(r.due_at)}`;
+      // Public channel notices include only the event name and the due time.
+      // Discord is instructed to ping only the reminder owner.
+      const title = clamp(String(r.title).replace(/[\r\n]/g, ' ').replace(/([\\*_~`|])/g, '\\$1'), 80);
+      const content = `<@${r.user_id}> Nhắc nhở: **${title}** — ${discordTime(r.due_at, 'f')}`;
       await discordRequest(`/channels/${r.channel_id}/messages`, env.DISCORD_BOT_TOKEN, 'POST', {
         content: clamp(content, 1900), allowed_mentions: { parse: [], users: [r.user_id] }
       });
@@ -473,6 +491,7 @@ async function processReminders(env, clock = Date.now()) {
 async function handleComponent(interaction, env, ctx) {
   const id = interaction.data?.custom_id || '';
   const parts = id.split(':');
+  if (parts[0] === 'free') return freeButton(interaction, env, ctx, editOriginal);
   if (parts[0] !== 'steam') return reply('Nút không được hỗ trợ.', true);
   const owner = parts[1] === 'pick' ? parts[2] : parts[4];
   if (owner !== requestUserId(interaction)) return reply('Chỉ người tìm game mới được chuyển trang / chọn game.', true);
@@ -541,7 +560,7 @@ async function voiceApi(request, env, path) {
 async function voiceCommand(interaction, env) {
   const action = interaction.data?.name;
   if (!interaction.guild_id || !requestUserId(interaction)) return reply('Chỉ sử dụng được trong server Discord.', true);
-  if (!env.DB || !env.VOICE_SHARED_SECRET) return reply('Chưa cấu hình Voice Service / D1. Liên hệ quản trị viên.', true);
+  if (!env.DB || !env.VOICE_SHARED_SECRET) return reply('Bot phát nhạc chưa sẵn sàng. Thử lại sau.', true);
   let url = null;
   if (action === 'play') {
     const raw = String(option(interaction, 'url')?.value || '').trim();
@@ -555,15 +574,16 @@ async function voiceCommand(interaction, env) {
   try {
     const result = await env.DB.prepare('INSERT INTO voice_jobs (guild_id,user_id,channel_id,action,url,created_at) VALUES (?,?,?,?,?,?)')
       .bind(interaction.guild_id, requestUserId(interaction), interaction.channel_id, action, url, Date.now()).run();
-    return reply(`Đã nhận yêu cầu **/${action}** (#${result.meta?.last_row_id || '?'}). Voice Service sẽ xử lý sau vài giây.`, true);
+    return reply(`Đã nhận lệnh **/${action}**.`, true);
   } catch (error) {
     console.error('Voice job insert:', error);
-    return reply('Không thể lưu yêu cầu phát nhạc vào D1. Kiểm tra bảng voice_jobs.', true);
+    return reply('Không thể xử lý yêu cầu phát nhạc. Thử lại sau.', true);
   }
 }
 
 async function handleCommand(interaction, env, ctx) {
   const command = interaction.data?.name;
+  if (command === 'free') return freeCommand(interaction, env, ctx, editOriginal);
   if (command === 'steam') {
     const query = clamp(option(interaction, 'query')?.value, 100);
     if (!query) return reply('Nhập tên game hoặc AppID.', true);
@@ -580,6 +600,7 @@ async function handleCommand(interaction, env, ctx) {
   if (command === 'help') return reply(
     '**Steam & Events Bot**\n' +
     '`/steam query:` Tìm game theo AppID/tên, gợi ý khi nhập.\n' +
+    '`/free now`, `/free upcoming`, `/free search`, `/free help`: Săn game miễn phí và cấu hình thông báo.\n' +
     '`/member user:` Xem thông tin thành viên (có thể bỏ trống user).\n' +
     '`/avatar user:` Xem avatar lớn.\n' +
     '`/remind create event when channel:` Đặt nhắc sự kiện.\n' +
@@ -608,7 +629,8 @@ export default {
     return reply('Unsupported interaction', true);
   },
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(processReminders(env).catch(e => console.error('Cron error:', e)));
+    ctx.waitUntil(processReminders(env).catch(e => console.error('Cron reminder error:', e)));
+    ctx.waitUntil(freeCron(env).catch(e => console.error('Cron free games error:', e)));
   }
 };
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import readline from 'node:readline';
 
 const commands = [
@@ -110,6 +111,7 @@ const commands = [
     description: 'Huong dan su dung Discord Steam Bot',
     type: 1,
   },
+  JSON.parse(readFileSync(new URL('./free-commands.json', import.meta.url), 'utf8')),
 ];
 
 async function ask(query) {

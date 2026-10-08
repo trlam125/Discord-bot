@@ -66,13 +66,14 @@ $commands = @(
     @{ name = 'help'; description = 'Huong dan su dung Discord Steam Bot'; type = 1 }
 )
 
+$commands += (Get-Content -Raw -Encoding UTF8 (Join-Path $PSScriptRoot 'free-commands.json') | ConvertFrom-Json)
 $payload = ConvertTo-Json -InputObject $commands -Depth 12 -Compress
 $uri = "https://discord.com/api/v10/applications/$ApplicationId/guilds/$GuildId/commands"
 # Discord requires an explicit, valid User-Agent on HTTP API requests.
 $userAgent = 'DiscordBot (https://github.com/trlam125/Discord-bot, 1.0.0)'
 try {
     $result = Invoke-RestMethod -Method Put -Uri $uri -Headers @{ Authorization = "Bot $Token" } -UserAgent $userAgent -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
-    Write-Host "OK. Registered $(@($result).Count) commands: steam, member, avatar, remind, help, play, pause, resume, skip, queue, stop" -ForegroundColor Green
+    Write-Host "OK. Registered $(@($result).Count) commands: steam, member, avatar, remind, help, play, pause, resume, skip, queue, stop, free" -ForegroundColor Green
 }
 catch {
     $errorText = $_.ErrorDetails.Message

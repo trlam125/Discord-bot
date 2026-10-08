@@ -1,0 +1,65 @@
+name: Deploy Discord bot to Cloudflare
+
+# Run from GitHub Actions. No local computer needs to run the bot or deploy it.
+on:
+  workflow_dispatch:
+    inputs:
+      register_commands:
+        description: "Register Discord guild slash commands (overwrites this bot's guild commands)"
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-bot-cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test, migrate Cloudflare D1, deploy Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Wrangler dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run Worker tests
+        run: npm test
+
+      - name: Apply Free Games tables to existing remote D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          : "${CLOUDFLARE_API_TOKEN:?Add CLOUDFLARE_API_TOKEN in GitHub Actions secrets}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?Add CLOUDFLARE_ACCOUNT_ID in GitHub Actions secrets}"
+          npx wrangler d1 execute DB --remote --file=./free-games.sql --yes
+
+      - name: Deploy Cloudflare Worker and Cron trigger
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
+      - name: Register Discord slash commands
+        if: ${{ inputs.register_commands }}
+        env:
+          DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
+          DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+        run: |
+          : "${DISCORD_APPLICATION_ID:?Add DISCORD_APPLICATION_ID in GitHub Actions secrets}"
+          : "${DISCORD_GUILD_ID:?Add DISCORD_GUILD_ID in GitHub Actions secrets}"
+          : "${DISCORD_BOT_TOKEN:?Add DISCORD_BOT_TOKEN in GitHub Actions secrets}"
+          node scripts/register-commands.js
