@@ -1,0 +1,8 @@
+# Copy to voice-service/.env (do not commit). Use the SAME bot token as Cloudflare.
+DISCORD_BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN
+WORKER_URL=https://discord-bot.lamlt-b23cn478.workers.dev
+VOICE_SHARED_SECRET=A_RANDOM_LONG_SECRET_SHARED_WITH_WORKER
+# Comma-separated allowlist. Only public HTTPS sources on these hosts are allowed.
+# Add other trusted hosts that serve direct audio files if desired.
+AUDIO_ALLOWED_HOSTS=youtube.com,youtu.be,soundcloud.com,soundhelix.com
+POLL_INTERVAL_MS=5000

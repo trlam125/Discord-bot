@@ -489,6 +489,79 @@ async function handleComponent(interaction, env, ctx) {
   return json({ type: 6 }); // Defer UPDATE_MESSAGE to avoid the 3-second interaction timeout.
 }
 
+// Voice commands remain HTTP interactions; a separate Gateway client on an Always Free VM
+// consumes durable jobs from D1. No incoming HTTP listener on that VM is required.
+const VOICE_ACTIONS = new Set(['play', 'pause', 'resume', 'skip', 'stop', 'queue']);
+
+function secretEquals(actual, expected) {
+  if (typeof actual !== 'string' || typeof expected !== 'string' || !expected) return false;
+  const a = new TextEncoder().encode(actual);
+  const b = new TextEncoder().encode(expected);
+  let mismatch = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) mismatch |= (a[i] || 0) ^ (b[i] || 0);
+  return mismatch === 0;
+}
+
+function authorizedVoice(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  return secretEquals(auth, `Bearer ${env.VOICE_SHARED_SECRET || ''}`) && !!env.VOICE_SHARED_SECRET;
+}
+
+async function voiceApi(request, env, path) {
+  if (!authorizedVoice(request, env)) return json({ error: 'Unauthorized' }, 401);
+  if (!env.DB) return json({ error: 'D1 binding missing' }, 503);
+  const now = Date.now();
+  try {
+    if (request.method === 'GET' && path === '/voice/jobs') {
+      // Restore jobs when the voice process crashed mid-delivery.
+      await env.DB.prepare("UPDATE voice_jobs SET status='pending', claimed_at=NULL WHERE status='processing' AND claimed_at < ?")
+        .bind(now - 120000).run();
+      const rows = await env.DB.prepare("SELECT id,guild_id,user_id,channel_id,action,url FROM voice_jobs WHERE status='pending' ORDER BY id LIMIT 5").all();
+      const jobs = [];
+      for (const job of rows.results || []) {
+        const update = await env.DB.prepare("UPDATE voice_jobs SET status='processing',claimed_at=? WHERE id=? AND status='pending'").bind(now, job.id).run();
+        if ((update.meta?.changes || 0) === 1) jobs.push(job);
+      }
+      return json({ jobs });
+    }
+    if (request.method === 'POST' && path === '/voice/ack') {
+      const data = await request.json().catch(() => null);
+      if (!Number.isSafeInteger(data?.id) || data.id < 1 || typeof data.ok !== 'boolean') return json({ error: 'Invalid ACK' }, 400);
+      await env.DB.prepare("UPDATE voice_jobs SET status=?,finished_at=?,error=? WHERE id=? AND status='processing'")
+        .bind(data.ok ? 'done' : 'failed', now, data.ok ? null : clamp(data.error || 'unknown', 200), data.id).run();
+      return json({ ok: true });
+    }
+    return json({ error: 'Not found' }, 404);
+  } catch (err) {
+    console.error('Voice API D1 error:', err);
+    return json({ error: 'Queue unavailable' }, 503);
+  }
+}
+
+async function voiceCommand(interaction, env) {
+  const action = interaction.data?.name;
+  if (!interaction.guild_id || !requestUserId(interaction)) return reply('Chỉ sử dụng được trong server Discord.', true);
+  if (!env.DB || !env.VOICE_SHARED_SECRET) return reply('Chưa cấu hình Voice Service / D1. Liên hệ quản trị viên.', true);
+  let url = null;
+  if (action === 'play') {
+    const raw = String(option(interaction, 'url')?.value || '').trim();
+    if (raw.length > 900) return reply('URL quá dài (tối đa 900 ký tự).', true);
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) throw Error('Invalid HTTPS URL');
+      url = parsed.href;
+    } catch { return reply('Vui lòng nhập link HTTPS hợp lệ. Không hỗ trợ file://, HTTP hoặc link nội bộ.', true); }
+  }
+  try {
+    const result = await env.DB.prepare('INSERT INTO voice_jobs (guild_id,user_id,channel_id,action,url,created_at) VALUES (?,?,?,?,?,?)')
+      .bind(interaction.guild_id, requestUserId(interaction), interaction.channel_id, action, url, Date.now()).run();
+    return reply(`Đã nhận yêu cầu **/${action}** (#${result.meta?.last_row_id || '?'}). Voice Service sẽ xử lý sau vài giây.`, true);
+  } catch (error) {
+    console.error('Voice job insert:', error);
+    return reply('Không thể lưu yêu cầu phát nhạc vào D1. Kiểm tra bảng voice_jobs.', true);
+  }
+}
+
 async function handleCommand(interaction, env, ctx) {
   const command = interaction.data?.name;
   if (command === 'steam') {
@@ -502,6 +575,7 @@ async function handleCommand(interaction, env, ctx) {
     // No outbound Discord API or deferred webhook: respond in the initial 3-second window.
     return json({ type: 4, data: userInfo(interaction) });
   }
+  if (VOICE_ACTIONS.has(command)) return voiceCommand(interaction, env);
   if (command === 'remind') return reminderCommand(interaction, env);
   if (command === 'help') return reply(
     '**Steam & Events Bot**\n' +
@@ -510,12 +584,15 @@ async function handleCommand(interaction, env, ctx) {
     '`/avatar user:` Xem avatar lớn.\n' +
     '`/remind create event when channel:` Đặt nhắc sự kiện.\n' +
     '`/remind list` và `/remind cancel id:` Xem/hủy nhắc.\n' +
+    '`/play url:` Phát link âm thanh trong voice; `/pause`, `/resume`, `/skip`, `/queue`, `/stop`.\n' +
     'Thời gian: `15m`, `2h`, `1d`, `1w` hoặc `YYYY-MM-DD HH:mm` (UTC+7).', true);
   return reply('Lệnh chưa được hỗ trợ. Dùng /help.', true);
 }
 
 export default {
   async fetch(request, env, ctx) {
+    const path = new URL(request.url).pathname;
+    if (path === '/voice/jobs' || path === '/voice/ack') return voiceApi(request, env, path);
     if (request.method === 'GET') return json({ status: 'ok', service: 'steam-discord-worker' });
     if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
     if (!env.DISCORD_PUBLIC_KEY) return new Response('Public key not configured', { status: 503 });

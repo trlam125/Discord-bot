@@ -55,6 +55,14 @@ $commands = @(
             }
         )
     },
+    @{ name = 'play'; description = 'Phat am thanh HTTPS trong phong thoai'; type = 1; options = @(
+        @{ type = 3; name = 'url'; description = 'YouTube/SoundCloud hoac link MP3 cong khai'; required = $true; max_length = 900 }
+    ) },
+    @{ name = 'pause'; description = 'Tam dung phat nhac'; type = 1 },
+    @{ name = 'resume'; description = 'Tiep tuc phat nhac'; type = 1 },
+    @{ name = 'skip'; description = 'Chuyen bai dang phat'; type = 1 },
+    @{ name = 'queue'; description = 'Danh sach nhac dang cho'; type = 1 },
+    @{ name = 'stop'; description = 'Dung nhac va roi phong thoai'; type = 1 },
     @{ name = 'help'; description = 'Huong dan su dung Discord Steam Bot'; type = 1 }
 )
 
@@ -64,7 +72,7 @@ $uri = "https://discord.com/api/v10/applications/$ApplicationId/guilds/$GuildId/
 $userAgent = 'DiscordBot (https://github.com/trlam125/Discord-bot, 1.0.0)'
 try {
     $result = Invoke-RestMethod -Method Put -Uri $uri -Headers @{ Authorization = "Bot $Token" } -UserAgent $userAgent -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
-    Write-Host "OK. Registered $(@($result).Count) commands: steam, member, avatar, remind, help" -ForegroundColor Green
+    Write-Host "OK. Registered $(@($result).Count) commands: steam, member, avatar, remind, help, play, pause, resume, skip, queue, stop" -ForegroundColor Green
 }
 catch {
     $errorText = $_.ErrorDetails.Message

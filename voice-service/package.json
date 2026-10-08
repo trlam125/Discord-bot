@@ -1,0 +1,13 @@
+{
+  "name": "discord-voice-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.17.0" },
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "@discordjs/voice": "^0.19.2",
+    "opusscript": "^0.1.1"
+  }
+}

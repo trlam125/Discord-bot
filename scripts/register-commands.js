@@ -97,6 +97,15 @@ const commands = [
     ],
   },
   {
+    name: 'play', description: 'Phat am thanh HTTPS trong phong thoai', type: 1,
+    options: [{ type: 3, name: 'url', description: 'YouTube/SoundCloud hoac link MP3 cong khai', required: true, max_length: 900 }],
+  },
+  { name: 'pause', description: 'Tam dung phat nhac', type: 1 },
+  { name: 'resume', description: 'Tiep tuc phat nhac', type: 1 },
+  { name: 'skip', description: 'Chuyen bai dang phat', type: 1 },
+  { name: 'queue', description: 'Danh sach nhac dang cho', type: 1 },
+  { name: 'stop', description: 'Dung nhac va roi phong thoai', type: 1 },
+  {
     name: 'help',
     description: 'Huong dan su dung Discord Steam Bot',
     type: 1,

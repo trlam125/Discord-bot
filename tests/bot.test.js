@@ -339,3 +339,74 @@ test('failed Discord notification reaches max retry and is marked failed', async
     assert.equal(row.attempts, 5);
   } finally { globalThis.fetch = oldFetch; }
 });
+
+test('voice slash command queues job, polls securely and acknowledges completion', async () => {
+  const keys = await fixture();
+  const jobs = [];
+  const env = {
+    DISCORD_PUBLIC_KEY: keys.pubHex,
+    VOICE_SHARED_SECRET: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDE',
+    DB: { prepare(sql) {
+      return { bind(...params) {
+        return {
+          async run() {
+            if (sql.startsWith('INSERT INTO voice_jobs')) {
+              const [guild_id,user_id,channel_id,action,url,created_at] = params;
+              jobs.push({ id: jobs.length + 1,guild_id,user_id,channel_id,action,url,created_at,status:'pending' });
+              return { meta: { changes: 1, last_row_id: jobs.length } };
+            }
+            if (sql.includes("SET status='pending', claimed_at=NULL")) return { meta: { changes: 0 } };
+            if (sql.includes("SET status='processing',claimed_at=?")) {
+              const row = jobs.find(x => x.id === params[1] && x.status === 'pending');
+              if (!row) return { meta: { changes: 0 } };
+              row.status = 'processing';
+              return { meta: { changes: 1 } };
+            }
+            if (sql.includes('SET status=?,finished_at=?,error=?')) {
+              const row = jobs.find(x => x.id === params[3]);
+              if (row) { row.status = params[0]; row.error = params[2]; }
+              return { meta: { changes: row ? 1 : 0 } };
+            }
+            throw Error('Unexpected voice SQL: '+sql);
+          }
+        };
+      }, async all() {
+        if (!sql.includes('FROM voice_jobs')) throw Error('Unexpected select');
+        return { results: jobs.filter(x => x.status === 'pending').map(x => ({...x})) };
+      } };
+    } }
+  };
+  const ctx = makeContext().ctx;
+  const interaction = sample(2,'play',[{name:'url',type:3,value:'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'}]);
+  let res = await worker.fetch(await sign(interaction,keys.privateKey), env,ctx);
+  assert.equal(res.status,200);
+  assert.match((await res.json()).data.content,/Đã nhận yêu cầu/);
+  assert.equal(jobs.length,1);
+  assert.equal(jobs[0].status,'pending');
+  res = await worker.fetch(new Request('https://example.workers.dev/voice/jobs'),env,ctx);
+  assert.equal(res.status,401);
+  res = await worker.fetch(new Request('https://example.workers.dev/voice/jobs',{headers:{Authorization:`Bearer ${env.VOICE_SHARED_SECRET}`}}),env,ctx);
+  assert.equal(res.status,200);
+  const data = await res.json();
+  assert.equal(data.jobs.length,1);
+  assert.equal(data.jobs[0].action,'play');
+  assert.equal(jobs[0].status,'processing');
+  res = await worker.fetch(new Request('https://example.workers.dev/voice/ack',{
+    method:'POST',headers:{Authorization:`Bearer ${env.VOICE_SHARED_SECRET}`},body:JSON.stringify({id:1,ok:true})
+  }),env,ctx);
+  assert.equal(res.status,200);
+  assert.equal(jobs[0].status,'done');
+});
+
+test('voice rejects invalid URL, no guild or missing voice service configuration', async () => {
+  const keys = await fixture();
+  const ctx = makeContext().ctx;
+  const interaction = sample(2,'play',[{name:'url',type:3,value:'file:///etc/passwd'}]);
+  const env = {DISCORD_PUBLIC_KEY:keys.pubHex,VOICE_SHARED_SECRET:'test-secret'};
+  const res = await worker.fetch(await sign(interaction,keys.privateKey),env,ctx);
+  const data = await res.json();
+  assert.match(data.data.content,/Chưa cấu hình Voice Service/);
+  const fakeDB = { prepare(){ throw Error('Should not insert invalid URL'); } };
+  const res2= await worker.fetch(await sign(interaction,keys.privateKey),{...env,DB:fakeDB},ctx);
+  assert.match((await res2.json()).data.content,/HTTPS hợp lệ/);
+});
