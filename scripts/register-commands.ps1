@@ -60,12 +60,26 @@ $commands = @(
 
 $payload = ConvertTo-Json -InputObject $commands -Depth 12 -Compress
 $uri = "https://discord.com/api/v10/applications/$ApplicationId/guilds/$GuildId/commands"
+# Discord requires an explicit, valid User-Agent on HTTP API requests.
+$userAgent = 'DiscordBot (https://github.com/trlam125/Discord-bot, 1.0.0)'
 try {
-    $result = Invoke-RestMethod -Method Put -Uri $uri -Headers @{ Authorization = "Bot $Token" } -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
+    $result = Invoke-RestMethod -Method Put -Uri $uri -Headers @{ Authorization = "Bot $Token" } -UserAgent $userAgent -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
     Write-Host "OK. Registered $(@($result).Count) commands: steam, member, avatar, remind, help" -ForegroundColor Green
 }
 catch {
+    $errorText = $_.ErrorDetails.Message
+    if (-not $errorText) { $errorText = $_.Exception.Message }
     Write-Host "Registration failed: $($_.Exception.Message)" -ForegroundColor Red
+    if ($errorText -match '40333') {
+        Write-Warning 'Discord/Cloudflare blocked this request (40333). User-Agent is now set; if it persists, check VPN/proxy or try another network. Avoid rapid retries.'
+    } elseif ($errorText -match '401|Unauthorized') {
+        Write-Warning 'Authentication failed: check the bot token for this Discord application.'
+    } elseif ($errorText -match '50001|Missing Access') {
+        Write-Warning 'Check that the bot is installed in the target server and applications.commands scope is enabled.'
+    }
+    if ($_.ErrorDetails.Message) {
+        Write-Host "Discord API response: $($_.ErrorDetails.Message)" -ForegroundColor Yellow
+    }
     throw
 }
 finally { $Token = $null }
