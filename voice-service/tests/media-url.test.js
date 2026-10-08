@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isPublicIP, parsePublicHttpsUrl, validatePublicHttpsUrl, resolveMediaInput } from '../media-url.js';
+import { isPublicIP, parsePublicHttpsUrl, validatePublicHttpsUrl, resolveMediaInput, probeDirectAudioUrl } from '../media-url.js';
 
 const dns = async hostname => {
   if (hostname === 'private.example.org') return [{ address: '10.0.0.23', family: 4 }];
@@ -77,7 +77,7 @@ test('yt-dlp cannot hand ffmpeg an internal stream or a redirect target it expos
 
 test('unsupported website returns a useful, non-sensitive error', async () => {
   await assert.rejects(resolveMediaInput('https://unknown.example.org/some/page', {
-    lookup: dns, run: async () => { throw { code: 1, stderr: 'private provider detail and cookie' }; }
+    lookup: dns, head: async () => ({ok:false}), run: async () => { throw { code: 1, stderr: 'private provider detail and cookie' }; }
   }), /yt-dlp không thể trích xuất/);
 });
 
@@ -99,5 +99,39 @@ test('yt-dlp actionable error messages do not echo secrets or raw stderr', async
   }), /yt-dlp-ejs/);
   await assert.rejects(resolveMediaInput('https://www.youtube.com/watch?v=hO4X_mJSqPI', {
     lookup: dns, run: async () => { throw { stderr: 'Sign in to confirm you are not a bot, token SECRET' }; }
-  }), /AWS/);
+  }), /máy chủ hiện tại/);
+});
+
+test('tokenized CDN with octet-stream audio filename can play without yt-dlp', async () => {
+  let headOptions;
+  const url = 'https://files.workercdn.com/hash?token=abc&fn=song_128k.mp3';
+  const output = await resolveMediaInput(url, {
+    lookup: dns,
+    head: async (_url, opts) => {
+      headOptions = opts;
+      return { ok: true, headers: new Headers({ 'content-type': 'application/octet-stream' }) };
+    },
+    run: async () => { throw Error('yt-dlp must not run for direct audio'); }
+  });
+  assert.equal(output, url);
+  assert.equal(headOptions.method, 'HEAD');
+  assert.equal(headOptions.redirect, 'error');
+});
+
+test('HEAD HTML does not bypass dedicated yt-dlp source extraction', async () => {
+  assert.equal(await probeDirectAudioUrl('https://example.org/foo', async () => ({
+    ok: true, headers: new Headers({'content-type':'text/html'})
+  })), false);
+  let used = false;
+  await resolveMediaInput('https://music.example.org/page', {
+    lookup: dns,
+    head: async () => ({ok:true,headers:new Headers({'content-type':'text/html'})}),
+    run: async () => { used = true; return {stdout:'https://cdn.example.org/song.mp3\n'}; }
+  });
+  assert.equal(used, true);
+});
+
+test('new URL limit accommodates signed CDN paths but still bounds input', () => {
+  assert.equal(parsePublicHttpsUrl('https://cdn.example.org/'+ 'a'.repeat(1300)).length, 1324);
+  assert.throws(() => parsePublicHttpsUrl('https://cdn.example.org/'+ 'a'.repeat(2100)), /quá dài/);
 });

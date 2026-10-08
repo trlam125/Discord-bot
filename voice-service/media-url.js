@@ -38,7 +38,7 @@ export function isPublicIP(ip) {
 
 /** Validate syntax and host before any network I/O. */
 export function parsePublicHttpsUrl(value) {
-  if (typeof value !== 'string' || !value || value.length > 900 || /[\r\n\x00-\x1F\x7F]/.test(value)) {
+  if (typeof value !== 'string' || !value || value.length > 2048 || /[\r\n\x00-\x1F\x7F]/.test(value)) {
     throw Error('URL trống, quá dài hoặc chứa ký tự không hợp lệ.');
   }
   let url;
@@ -93,7 +93,7 @@ function extractionFailure(err) {
   if (err.code === 'ENOENT') return Error('Chưa cài yt-dlp trên máy chủ.');
   const stderr = String(err.stderr || '').toLowerCase();
   if (/sign in to confirm|not a bot|this video is private|login required|members-only|age.restricted/.test(stderr)) {
-    return Error('YouTube yêu cầu đăng nhập hoặc xác minh truy cập từ máy chủ AWS; link này hiện không thể phát công khai.');
+    return Error('Nguồn yêu cầu đăng nhập hoặc xác minh truy cập từ máy chủ hiện tại.');
   }
   if (/javascript runtime|challenge solver|yt.dlp.ejs|ejs scripts/.test(stderr)) {
     return Error('Thiếu JavaScript runtime hoặc bộ giải thử thách yt-dlp-ejs. Hãy cài yt-dlp[default] và kiểm tra Node.js.');
@@ -102,12 +102,35 @@ function extractionFailure(err) {
     return Error('yt-dlp không tìm thấy luồng âm thanh có thể phát từ nguồn này.');
   }
   if (err.killed || err.signal === 'SIGKILL') return Error('yt-dlp xử lý quá lâu và bị dừng (timeout).');
-  return Error('yt-dlp không thể trích xuất link. Chạy yt-dlp trực tiếp trên EC2 để xem lỗi gốc (có thể do mạng, hạn chế YouTube hoặc nguồn không hỗ trợ).');
+  return Error('yt-dlp không thể trích xuất link. Chạy yt-dlp trực tiếp trên máy chủ để xem lỗi gốc (có thể do mạng hoặc nguồn không hỗ trợ).');
 }
 
-export async function resolveMediaInput(raw, { lookup = dnsLookup, run = execFileAsync } = {}) {
+/** A signed CDN URL can carry its filename in a query parameter, not in pathname. */
+export async function probeDirectAudioUrl(url, fetchFn = fetch) {
+  let response;
+  try {
+    response = await fetchFn(url, {
+      method: 'HEAD', redirect: 'error',
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch { return false; }
+  if (!response.ok) return false;
+  const type = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (type.startsWith('audio/') || ['application/vnd.apple.mpegurl', 'application/x-mpegurl'].includes(type)) return true;
+  if (type !== 'application/octet-stream') return false;
+  const parsed = new URL(url);
+  const name = parsed.searchParams.get('fn') || parsed.searchParams.get('filename') ||
+    response.headers.get('content-disposition') || '';
+  return DIRECT_AUDIO.test(name.split('?')[0]);
+}
+
+export async function resolveMediaInput(raw, { lookup = dnsLookup, run = execFileAsync, head = fetch } = {}) {
   const url = await validatePublicHttpsUrl(raw, lookup);
   if (DIRECT_AUDIO.test(new URL(url).pathname)) return url;
+  const host = new URL(url).hostname.toLowerCase();
+  // Do not HEAD video/music pages; only auto-probe otherwise unknown URL paths.
+  if (!/(^|\.)(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com)$/.test(host) &&
+      await probeDirectAudioUrl(url, head)) return url;
   const extractorUrl = await validatePublicHttpsUrl(standaloneVideoUrl(url), lookup);
 
   // Use site-specific extractors for popular public sites; refuse the generic

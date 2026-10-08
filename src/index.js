@@ -545,7 +545,7 @@ async function voiceCommand(interaction, env) {
   let url = null;
   if (action === 'play') {
     const raw = String(option(interaction, 'url')?.value || '').trim();
-    if (raw.length > 900) return reply('URL quá dài (tối đa 900 ký tự).', true);
+    if (raw.length > 2048) return reply('URL quá dài (tối đa 2048 ký tự).', true);
     try {
       const parsed = new URL(raw);
       if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) throw Error('Invalid HTTPS URL');

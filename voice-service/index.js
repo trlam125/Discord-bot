@@ -5,8 +5,11 @@
  * No inbound HTTP port; this process pulls authenticated jobs from Worker.
  */
 import { loadEnvFile } from 'node:process';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { parsePublicHttpsUrl, resolveMediaInput } from './media-url.js';
+import { fallbackConfigured, resolveFallbackMedia } from './fallback-provider.js';
+import { prepareAudioStream } from './ffmpeg-audio.js';
+import { tryPrimaryThenFallback } from './two-stage.js';
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import {
   joinVoiceChannel, createAudioPlayer, createAudioResource,
@@ -34,7 +37,7 @@ const api = (pathname) => new URL(pathname, workerUrl).href;
 const headers = { Authorization: `Bearer ${sharedSecret}`, 'Content-Type': 'application/json' };
 
 // Public URL verification and supported-site extraction are in media-url.js.
-// EC2 egress filtering also protects yt-dlp/FFmpeg redirects and HLS segments.
+// Apply an OS/container egress guard on ANY host: redirects, HLS and DNS rebinding bypass JavaScript DNS checks.
 
 async function say(channelId, text) {
   try {
@@ -51,43 +54,96 @@ function terminateFfmpeg(session) {
   if (proc && !proc.killed) proc.kill('SIGKILL');
 }
 
+function activeTrack(session, item, generation) {
+  return session.current === item && session.generation === generation && !session.controller?.signal.aborted;
+}
+
+function finishFailedTrack(session, item, generation, error) {
+  if (!activeTrack(session, item, generation)) return;
+  console.warn(`Voice track failed (${error?.message || 'unknown error'})`);
+  void say(item.channel_id, `Không phát được link: ${error?.message || 'Nguồn không khả dụng.'}`);
+  session.transitioning = true;
+  session.current = null;
+  session.controller?.abort();
+  terminateFfmpeg(session);
+  session.player.stop(true);
+  session.transitioning = false;
+  void playNext(session);
+}
+
+/** Source mode is resolved per song; no configuration is tied to AWS. */
+async function startSource(session, item, generation, mode) {
+  const streamUrl = mode === 'direct'
+    ? await resolveMediaInput(item.url)
+    : await resolveFallbackMedia(item.url);
+  if (!activeTrack(session, item, generation)) return false;
+  let decoder;
+  try {
+    decoder = await prepareAudioStream(streamUrl, {
+      signal: session.controller.signal,
+      onSpawn: proc => { session.ffmpeg = proc; },
+      timeoutMs: process.env.MEDIA_START_TIMEOUT_MS || 18000
+    });
+  } catch (error) {
+    if (session.ffmpeg) terminateFfmpeg(session);
+    throw error;
+  }
+  if (!activeTrack(session, item, generation)) {
+    decoder.proc.kill('SIGKILL');
+    return false;
+  }
+  session.ffmpeg = decoder.proc;
+  session.player.play(createAudioResource(decoder.stream, { inputType: StreamType.Raw, metadata: item }));
+  session.transitioning = false;
+  decoder.proc.on('close', code => {
+    if (!activeTrack(session, item, generation) || session.ffmpeg !== decoder.proc || decoder.proc.killed) return;
+    if (code !== 0) {
+      if (mode === 'direct' && fallbackConfigured()) {
+        void switchToFallback(session, item, generation);
+      } else {
+        finishFailedTrack(session, item, generation, Error('Nguồn âm thanh bị gián đoạn, không thể tiếp tục phát.'));
+      }
+    }
+  });
+  await say(item.channel_id, mode === 'direct'
+    ? `Đang phát (nguồn trực tiếp): ${item.url}`
+    : `Đang phát (nguồn trung gian): ${item.url}`);
+  return true;
+}
+
+async function switchToFallback(session, item, generation) {
+  if (!activeTrack(session, item, generation) || session.transitioning) return;
+  session.transitioning = true; // Prevent Idle from removing this song during retry.
+  terminateFfmpeg(session);
+  session.player.stop(true);
+  await say(item.channel_id, 'Nguồn trực tiếp lỗi, đang thử nguồn trung gian...');
+  if (!activeTrack(session, item, generation)) return;
+  try {
+    await startSource(session, item, generation, 'fallback');
+  } catch (error) {
+    finishFailedTrack(session, item, generation, error);
+  }
+}
+
 async function playNext(session) {
   if (session.current || !session.queue.length) return;
   const item = session.queue.shift();
   session.current = item;
+  session.transitioning = true;
+  session.controller = new AbortController();
   const generation = ++session.generation;
   try {
-    const streamUrl = await resolveMediaInput(item.url);
-    if (generation !== session.generation || !session.current) return;
-    const proc = spawn('ffmpeg', [
-      '-nostdin', '-hide_banner', '-loglevel', 'error',
-      // Prevent FFmpeg from opening local files or plain HTTP through playlists.
-      '-protocol_whitelist', 'https,tls,tcp,crypto',
-      '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
-      '-i', streamUrl, '-vn', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'
-    ], { stdio: ['ignore', 'pipe', 'pipe'],
-      env: Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(https?_proxy|all_proxy|no_proxy)$/i.test(k))) });
-    session.ffmpeg = proc;
-    let errText = '';
-    proc.stderr.on('data', x => { errText = (errText + x.toString()).slice(-500); });
-    proc.on('error', e => {
-      console.error('ffmpeg spawn:', e);
-      if (session.current === item) session.player.stop(true);
-    });
-    proc.on('close', code => {
-      if (code !== 0 && session.current === item && !proc.killed) {
-        void say(item.channel_id, `Không phát được âm thanh: ${errText || `FFmpeg exited ${code}`}`);
-        session.player.stop(true);
-      }
-    });
-    session.player.play(createAudioResource(proc.stdout, { inputType: StreamType.Raw, metadata: item }));
-    await say(item.channel_id, `Đang phát: ${item.url}`);
-  } catch (e) {
-    console.error('playNext error:', e);
-    await say(item.channel_id, `Không phát được link: ${e.message}`);
-    session.current = null;
-    terminateFfmpeg(session);
-    void playNext(session);
+    await tryPrimaryThenFallback(
+      () => startSource(session, item, generation, 'direct'),
+      async () => {
+        // Direct URL resolution failed or FFmpeg emitted no PCM.
+        session.transitioning = false;
+        await switchToFallback(session, item, generation);
+      },
+      () => fallbackConfigured() && activeTrack(session, item, generation)
+    );
+  } catch (error) {
+    finishFailedTrack(session, item, generation, error);
   }
 }
 
@@ -100,16 +156,34 @@ async function newSession(guild, voiceChannelId) {
   catch (e) { connection.destroy(); throw Error(`Unable to join voice channel: ${e.message}`); }
   const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
   connection.subscribe(player);
-  const session = { connection, player, voiceChannelId, queue: [], current: null, ffmpeg: null, generation: 0 };
-  player.on(AudioPlayerStatus.Idle, () => {
+  const session = { connection, player, voiceChannelId, queue: [], current: null, ffmpeg: null, generation: 0, transitioning: false, controller: null };
+  const completeTrack = () => {
+    if (session.transitioning || !session.current) return;
     session.current = null;
+    session.controller?.abort();
     terminateFfmpeg(session);
     void playNext(session);
+  };
+  player.on(AudioPlayerStatus.Idle, () => {
+    if (session.transitioning) return;
+    const proc = session.ffmpeg;
+    // stdout can finish before the child close event reports an FFmpeg error.
+    // Wait for close so that direct playback can fall back instead of
+    // incorrectly treating a failed stream as a finished song.
+    if (proc && !proc.killed && proc.exitCode !== 0) {
+      if (proc.exitCode === null) {
+        proc.once('close', () => {
+          if (session.ffmpeg === proc && !session.transitioning && proc.exitCode === 0) completeTrack();
+        });
+      }
+      return;
+    }
+    completeTrack();
   });
   player.on('error', e => {
     console.error('Voice playback error:', e);
     const channelId = session.current?.channel_id;
-    if (channelId) void say(channelId, `Lỗi phát nhạc: ${e.message}`);
+    if (channelId) void say(channelId, 'Lỗi truyền âm thanh tới Discord.');
     session.player.stop(true);
   });
   connection.on('error', e => console.error('Voice connection error:', e));
@@ -152,16 +226,19 @@ async function executeJob(job) {
       break;
     case 'skip': {
       if (!session.current) throw Error('Không có bài đang phát');
-      const wasPlaying = session.player.state.status !== AudioPlayerStatus.Idle;
       session.generation++;
+      session.controller?.abort();
       session.current = null;
+      session.transitioning = false;
       terminateFfmpeg(session);
       session.player.stop(true);
-      if (!wasPlaying) void playNext(session); // No Idle event while resolving URL.
+      void playNext(session); // Also handles skip while resolver/FFmpeg has not started.
       break;
     }
     case 'stop':
       session.generation++;
+      session.controller?.abort();
+      session.transitioning = false;
       session.queue = [];
       session.current = null;
       terminateFfmpeg(session);

@@ -8,3 +8,16 @@ POLL_INTERVAL_MS=5000
 # with a dedicated yt-dlp extractor are detected automatically.
 # IMPORTANT: On AWS, also apply the process-level egress firewall described
 # in AWS_VOICE_SETUP.md to prevent redirect/DNS-rebinding SSRF.
+
+# TWO-STAGE AUDIO (optional): direct yt-dlp/FFmpeg first, fallback API only on failure.
+# This must be an API YOU ARE AUTHORIZED TO USE (not a normal download web page).
+# It must accept POST {"url":"https://original-source"} and respond
+# JSON {"stream_url":"https://public-audio-cdn/..."}. HTTPS only.
+# No fallback request is sent when direct playback succeeds.
+# MEDIA_FALLBACK_API_URL=https://your-authorized-provider.example/api/resolve
+# MEDIA_FALLBACK_API_KEY=YOUR_PROVIDER_API_KEY
+# MEDIA_FALLBACK_TIMEOUT_MS=12000
+# MEDIA_START_TIMEOUT_MS=18000
+
+# If the user changes hosting, move voice-service/.env and configure equivalent
+# OS/container-level outbound firewall for this process; do not expose AWS URLs.

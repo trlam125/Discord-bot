@@ -3,6 +3,7 @@
   // Neu da tao Worker tu truoc, dat "name" DUNG bang ten Worker tren Cloudflare.
   "name": "discord-bot",
   "main": "src/index.js",
+  "keep_vars": true, // Preserve dashboard variables/secrets on Wrangler deploy.
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
   // Nhac su kien moi phut; quan ly Cron tai day, khong can tao thu cong.
