@@ -2,7 +2,9 @@
 DISCORD_BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN
 WORKER_URL=https://discord-bot.lamlt-b23cn478.workers.dev
 VOICE_SHARED_SECRET=A_RANDOM_LONG_SECRET_SHARED_WITH_WORKER
-# Comma-separated allowlist. Only public HTTPS sources on these hosts are allowed.
-# Add other trusted hosts that serve direct audio files if desired.
-AUDIO_ALLOWED_HOSTS=youtube.com,youtu.be,soundcloud.com,soundhelix.com
 POLL_INTERVAL_MS=5000
+
+# AUDIO_ALLOWED_HOSTS is no longer used. HTTPS direct audio URLs and websites
+# with a dedicated yt-dlp extractor are detected automatically.
+# IMPORTANT: On AWS, also apply the process-level egress firewall described
+# in AWS_VOICE_SETUP.md to prevent redirect/DNS-rebinding SSRF.

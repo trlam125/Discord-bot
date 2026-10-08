@@ -5,8 +5,8 @@
  * No inbound HTTP port; this process pulls authenticated jobs from Worker.
  */
 import { loadEnvFile } from 'node:process';
-import { spawn, execFile, spawnSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, spawnSync } from 'node:child_process';
+import { parsePublicHttpsUrl, resolveMediaInput } from './media-url.js';
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import {
   joinVoiceChannel, createAudioPlayer, createAudioResource,
@@ -19,8 +19,6 @@ try { loadEnvFile(new URL('./.env', import.meta.url)); } catch { /* systemd env 
 const token = process.env.DISCORD_BOT_TOKEN;
 const sharedSecret = process.env.VOICE_SHARED_SECRET;
 const workerUrl = process.env.WORKER_URL;
-const allowed = String(process.env.AUDIO_ALLOWED_HOSTS || 'youtube.com,youtu.be,soundcloud.com,soundhelix.com')
-  .split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 const pollMs = Math.max(2000, Number(process.env.POLL_INTERVAL_MS || 5000));
 if (!token || !sharedSecret || !workerUrl || !workerUrl.startsWith('https://')) {
   throw Error('Missing DISCORD_BOT_TOKEN, VOICE_SHARED_SECRET or HTTPS WORKER_URL');
@@ -30,34 +28,13 @@ if (spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status !== 0) throw E
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const sessions = new Map(); // guild -> player, connection, current and queue
-const execute = promisify(execFile);
 const completedIds = new Map();
 
 const api = (pathname) => new URL(pathname, workerUrl).href;
 const headers = { Authorization: `Bearer ${sharedSecret}`, 'Content-Type': 'application/json' };
 
-function allowedMediaUrl(text) {
-  const u = new URL(text);
-  if (u.protocol !== 'https:' || u.username || u.password) throw Error('Only public HTTPS URLs are supported');
-  const hostname = u.hostname.toLowerCase().replace(/\.$/, '');
-  if (!allowed.some(host => hostname === host || hostname.endsWith('.' + host))) {
-    throw Error(`Host ${hostname} is not in AUDIO_ALLOWED_HOSTS`);
-  }
-  return u.href;
-}
-
-async function mediaStream(url) {
-  const parsed = new URL(allowedMediaUrl(url));
-  if (/\.(mp3|ogg|opus|m4a|aac|wav|flac|m3u8)$/i.test(parsed.pathname)) return url;
-  // Extract supported streaming URLs (YouTube/SoundCloud and some other public sites).
-  // Does not bypass DRM, private videos or authentication restrictions.
-  const { stdout } = await execute('yt-dlp', [
-    '--no-playlist', '--no-warnings', '-f', 'bestaudio/best', '-g', url
-  ], { timeout: 20000, maxBuffer: 1024 * 64 });
-  const resolved = stdout.trim().split(/\r?\n/)[0];
-  if (!resolved || !resolved.startsWith('https://')) throw Error('Could not resolve a public HTTPS audio stream');
-  return resolved;
-}
+// Public URL verification and supported-site extraction are in media-url.js.
+// EC2 egress filtering also protects yt-dlp/FFmpeg redirects and HLS segments.
 
 async function say(channelId, text) {
   try {
@@ -80,13 +57,16 @@ async function playNext(session) {
   session.current = item;
   const generation = ++session.generation;
   try {
-    const streamUrl = await mediaStream(item.url);
+    const streamUrl = await resolveMediaInput(item.url);
     if (generation !== session.generation || !session.current) return;
     const proc = spawn('ffmpeg', [
       '-nostdin', '-hide_banner', '-loglevel', 'error',
+      // Prevent FFmpeg from opening local files or plain HTTP through playlists.
+      '-protocol_whitelist', 'https,tls,tcp,crypto',
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
       '-i', streamUrl, '-vn', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ], { stdio: ['ignore', 'pipe', 'pipe'],
+      env: Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(https?_proxy|all_proxy|no_proxy)$/i.test(k))) });
     session.ffmpeg = proc;
     let errText = '';
     proc.stderr.on('data', x => { errText = (errText + x.toString()).slice(-500); });
@@ -145,7 +125,7 @@ async function executeJob(job) {
   if (job.action === 'play') {
     if (!userVoice) throw Error('Bạn cần vào phòng thoại trước khi /play');
     if (session && session.voiceChannelId !== userVoice) throw Error('Bot đang ở phòng thoại khác');
-    const url = allowedMediaUrl(job.url);
+    const url = parsePublicHttpsUrl(job.url);
     if (!session) session = await newSession(guild, userVoice);
     if (session.queue.length >= 20) throw Error('Hàng đợi đã đủ 20 bài');
     session.queue.push({ url, channel_id: job.channel_id });
