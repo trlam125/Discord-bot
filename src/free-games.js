@@ -214,28 +214,39 @@ async function syncOffers(env, now = Date.now(), force = false) {
     // D1 .batch() runs statements as a transaction. Keep batches modest.
     for (let i=0; i<statements.length; i+=60) await env.DB.batch(statements.slice(i, i + 60));
     const settings = await env.DB.prepare('SELECT * FROM free_settings WHERE enabled=1').all();
-    const newOffers = await env.DB.prepare('SELECT * FROM free_offers WHERE first_seen_at=? AND last_seen_at=?').bind(now, now).all();
+    // Consider ALL offers confirmed by the current poll, not only newly inserted rows.
+    // The delivery primary key makes retries/repeated polls idempotent per guild + promotion.
+    // Never backfill expired offers or an upcoming phase that has already started.
+    const available = await env.DB.prepare(`SELECT * FROM free_offers WHERE last_seen_at=?
+      AND ((phase='active' AND (start_at IS NULL OR start_at<=?) AND (end_at IS NULL OR end_at>?))
+        OR (phase='upcoming' AND start_at>? AND (end_at IS NULL OR end_at>?)))`)
+      .bind(now, now, now, now, now).all();
+    let queuedCount = 0;
     for (const s of settings.results || []) {
-      // First sync after /free setup establishes a baseline, never floods old deals.
       if (!s.bootstrapped) {
         await env.DB.prepare('UPDATE free_settings SET bootstrapped=1 WHERE guild_id=? AND bootstrapped=0').bind(s.guild_id).run();
-        continue;
       }
-      const queued = (newOffers.results || []).filter(o => matchesSetting(o,s));
-      if (queued.length) {
-        const jobs = queued.map(o => env.DB.prepare('INSERT OR IGNORE INTO free_deliveries(guild_id,offer_key,next_attempt_at) VALUES (?,?,?)')
-          .bind(s.guild_id,o.offer_key,now));
-        for (let i=0; i<jobs.length; i+=60) await env.DB.batch(jobs.slice(i,i+60));
+      const eligible = (available.results || []).filter(o => matchesSetting(o, s));
+      if (!eligible.length) continue;
+      const jobs = eligible.map(o => env.DB.prepare('INSERT OR IGNORE INTO free_deliveries(guild_id,offer_key,next_attempt_at) VALUES (?,?,?)')
+        .bind(s.guild_id, o.offer_key, now));
+      for (let i=0; i<jobs.length; i+=60) {
+        const results = await env.DB.batch(jobs.slice(i,i+60));
+        queuedCount += results.reduce((total, r) => total + (r.meta?.changes || 0), 0);
       }
     }
     await env.DB.prepare("UPDATE free_sync SET succeeded_at=?,locked_at=NULL,last_error=? WHERE name='global'")
       .bind(now, warnings.length ? warnings.join(', ') : null).run();
-    // Retain last 14 days of history for display but prune old delivery records.
-    await env.DB.prepare("DELETE FROM free_deliveries WHERE status IN ('sent','failed') AND (sent_at<? OR (sent_at IS NULL AND next_attempt_at<?))")
-      .bind(now - 30 * 86400000, now - 30 * 86400000).run();
+    // Keep notification history for the entire lifetime of a promotion, including
+    // promotions lasting longer than 30 days. Otherwise the same offer is sent again.
+    await env.DB.prepare(`DELETE FROM free_deliveries WHERE status IN ('sent','failed')
+      AND (sent_at<? OR (sent_at IS NULL AND next_attempt_at<?))
+      AND offer_key NOT IN (SELECT offer_key FROM free_offers WHERE
+        (end_at IS NULL OR end_at>?) AND last_seen_at>=?)`)
+      .bind(now - 30 * 86400000, now - 30 * 86400000, now, now - 14 * 86400000).run();
     await env.DB.prepare('DELETE FROM free_offers WHERE last_seen_at<? AND offer_key NOT IN (SELECT offer_key FROM free_deliveries)')
       .bind(now - 14 * 86400000).run();
-    return { count: offers.length, newOffers: (newOffers.results || []).length, warnings };
+    return { count: offers.length, queued: queuedCount, warnings };
   } catch (err) {
     await env.DB.prepare("UPDATE free_sync SET locked_at=NULL,last_error=? WHERE name='global'").bind(text(err?.message,180)).run();
     throw err;
@@ -378,7 +389,7 @@ async function runCommand(interaction, env, edit) {
       await env.DB.prepare(`INSERT INTO free_settings(guild_id,channel_id,role_id,updated_at) VALUES(?,?,?,?)
         ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id,role_id=COALESCE(excluded.role_id,free_settings.role_id),enabled=1,updated_at=excluded.updated_at`)
         .bind(guild,channel,role?String(role):null,now).run();
-      return edit(interaction,interactionReply('Đã chọn kênh thông báo. Bot sẽ chỉ thông báo **ưu đãi mới** kể từ sau lần đồng bộ đầu tiên. Dùng `/free test` để kiểm tra quyền gửi tin.'));
+      return edit(interaction,interactionReply('Đã chọn kênh thông báo. Bot sẽ thông báo các **ưu đãi đang còn hiệu lực và chưa từng gửi** kể từ lần đồng bộ kế tiếp. Dùng `/free test` để kiểm tra quyền gửi tin.'));
     }
     if (!existing) return edit(interaction,interactionReply('Hãy chạy `/free setup` trước.'));
     if (cmd==='filter') {
@@ -390,7 +401,7 @@ async function runCommand(interaction, env, edit) {
         return edit(interaction,interactionReply('Bộ lọc không hợp lệ. Cửa hàng: `steam,epic,gog,itch,other,all`; loại: `game,loot,beta,all`; giá: 0–10000.'));
       await env.DB.prepare('UPDATE free_settings SET stores=?,kinds=?,min_price=?,notify_upcoming=?,updated_at=? WHERE guild_id=?')
         .bind(stores,kinds,Number(price),upcoming,Date.now(),guild).run();
-      return edit(interaction,interactionReply('Đã cập nhật bộ lọc. Lọc mới áp dụng cho các ưu đãi **phát hiện sau thời điểm này**.'));
+      return edit(interaction,interactionReply('Đã cập nhật bộ lọc. Lọc mới áp dụng từ lần đồng bộ kế tiếp, kể cả ưu đãi đang còn hiệu lực nhưng chưa từng gửi.'));
     }
     if (cmd==='theme') {
       const theme = getOpt(interaction,'style');

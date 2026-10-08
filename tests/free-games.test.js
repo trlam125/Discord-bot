@@ -100,23 +100,115 @@ test('collectOffers merges feeds and prefers direct Epic over duplicate aggregat
   assert.deepEqual(warnings,[]);
 });
 
-test('initial sync creates a baseline, subsequent newly found deals notify once per guild and never ping everyone',async()=>{
+test('initial sync sends eligible offers, subsequent polls send only newly undelivered deals and never ping everyone',async()=>{
   const db=makeDb();setGuild(db,{role:ROLE});setGuild(db,{guild:GUILD_B,store:'epic'});
   const current={gp:[gp(1)],epic:[]}; const posts=[];const restore=mockNetwork(()=>current,posts);
   const env={DB:db,DISCORD_BOT_TOKEN:'t'};
   try {
     await freeCron(env,FIXED_NOW);
-    assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS n FROM free_deliveries').get().n,0);
+    assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS n FROM free_deliveries').get().n,1);
+    assert.equal(posts.length,1);
     assert.equal(db.sqlite.prepare('SELECT bootstrapped FROM free_settings WHERE guild_id=?').get(GUILD_A).bootstrapped,1);
     current.gp=[gp(1),gp(2,'Game','$12.00','PC, Steam','Fresh deal')];
     await freeCron(env,FIXED_NOW+15*60000);
-    assert.equal(posts.length,1);
+    assert.equal(posts.length,2);
     assert.equal(posts[0].body.content,`<@&${ROLE}>`);
     assert.equal(posts[0].body.allowed_mentions.roles[0],ROLE);
     assert.equal(db.sqlite.prepare("SELECT status FROM free_deliveries WHERE guild_id=?").get(GUILD_A).status,'sent');
     await freeCron(env,FIXED_NOW+16*60000);
-    assert.equal(posts.length,1);
+    assert.equal(posts.length,2);
     assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS n FROM free_offers').get().n,2);
+  } finally {restore();}
+});
+
+test('regression: active Epic offers already saved in D1 without deliveries are backfilled once', async()=>{
+  const db=makeDb();setGuild(db,{bootstrapped:1,store:'epic'});
+  const titles=['Out of Sight','TerraScape'];
+  const current={gp:[],epic:titles.map((title,i)=>({...epic('promo-'+i,FIXED_NOW,true),title}))};
+  for(const [i,title] of titles.entries()) {
+    const offer=__freeTest.epicToOffers(current.epic[i],FIXED_NOW)[0];
+    db.sqlite.prepare(`INSERT INTO free_offers
+      (offer_key,source,store,kind,phase,title,claim_url,original_price,start_at,end_at,first_seen_at,last_seen_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(offer.offer_key,'epic','epic','game','active',title,offer.claim_url,14.99,offer.start_at,offer.end_at,FIXED_NOW-3600000,FIXED_NOW-60000);
+  }
+  const posts=[];const restore=mockNetwork(()=>current,posts);
+  try {
+    const env={DB:db,DISCORD_BOT_TOKEN:'t'};
+    await freeCron(env,FIXED_NOW);
+    assert.deepEqual(posts.map(p=>p.body.embeds[0].title).sort(),titles);
+    assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM free_deliveries WHERE status='sent'").get().n,2);
+    await freeCron(env,FIXED_NOW+15*60000);
+    assert.equal(posts.length,2,'do not resend on next poll');
+  } finally {restore();}
+});
+
+test('backfill only currently confirmed live offers and honors disabled guilds and game filters',async()=>{
+  const db=makeDb();setGuild(db,{bootstrapped:1,store:'steam'});setGuild(db,{guild:GUILD_B,bootstrapped:1,store:'epic',enabled:0});
+  const existing=__freeTest.epicToOffers(epic('stale',FIXED_NOW,true),FIXED_NOW)[0];
+  db.sqlite.prepare(`INSERT INTO free_offers (offer_key,source,store,kind,phase,title,claim_url,original_price,start_at,end_at,first_seen_at,last_seen_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(existing.offer_key,'epic','epic','game','active','Stale title',existing.claim_url,20,existing.start_at,existing.end_at,FIXED_NOW-100000,FIXED_NOW-60000);
+  const state={gp:[gp(1)],epic:[]}, posts=[];const restore=mockNetwork(()=>state,posts);
+  try {
+    const env={DB:db,DISCORD_BOT_TOKEN:'t'};
+    await freeCron(env,FIXED_NOW);
+    assert.equal(posts.length,1,'only Steam deal received');
+    assert.equal(posts[0].body.embeds[0].title,'Free paid title');
+    db.sqlite.prepare("UPDATE free_settings SET enabled=1,stores='steam' WHERE guild_id=?").run(GUILD_B);
+    await freeCron(env,FIXED_NOW+15*60000);
+    assert.equal(posts.length,2,'newly enabled guild receives still-live offer');
+    assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM free_deliveries WHERE offer_key=?").get(existing.offer_key).n,0);
+  } finally {restore();}
+});
+
+test('Epic upcoming does not alert when disabled, but active phase notifies after launch', async()=>{
+  const db=makeDb();setGuild(db,{bootstrapped:1,store:'epic',upcoming:0});
+  const state={gp:[],epic:[epic('transition',FIXED_NOW,false)]},posts=[];
+  const restore=mockNetwork(()=>state,posts);
+  try {
+    const env={DB:db,DISCORD_BOT_TOKEN:'t'};
+    await freeCron(env,FIXED_NOW);
+    assert.equal(posts.length,0);
+    const promo=state.epic[0].promotions.upcomingPromotionalOffers[0].promotionalOffers[0];
+    state.epic[0].promotions={upcomingPromotionalOffers:[],promotionalOffers:[{promotionalOffers:[promo]}]};
+    await freeCron(env,FIXED_NOW+2*3600000);
+    assert.equal(posts.length,1);
+    assert.equal(db.sqlite.prepare("SELECT o.phase FROM free_deliveries d JOIN free_offers o USING (offer_key)").get().phase,'active');
+  } finally {restore();}
+});
+
+test('a different Epic promotion next month is notified once again',async()=>{
+  const db=makeDb();setGuild(db,{bootstrapped:1,store:'epic'});
+  const state={gp:[],epic:[epic('repeat',FIXED_NOW,true)]},posts=[];
+  const restore=mockNetwork(()=>state,posts);
+  try {
+    const env={DB:db,DISCORD_BOT_TOKEN:'t'};
+    await freeCron(env,FIXED_NOW);
+    assert.equal(posts.length,1);
+    const again=FIXED_NOW+40*86400000;
+    state.epic=[epic('repeat',again,true)];
+    await freeCron(env,again);
+    assert.equal(posts.length,2);
+    assert.equal(db.sqlite.prepare("SELECT COUNT(DISTINCT offer_key) AS n FROM free_deliveries").get().n,1,
+      'delivery for the expired promotion is pruned after 30 days');
+    assert.equal(db.sqlite.prepare("SELECT o.start_at FROM free_deliveries d JOIN free_offers o USING(offer_key)").get().start_at, again-1000);
+    await freeCron(env,again+15*60000);
+    assert.equal(posts.length,2);
+  } finally {restore();}
+});
+
+test('a long-running deal does not re-notify after 30 days of history retention',async()=>{
+  const db=makeDb();setGuild(db,{bootstrapped:1,store:'epic'});
+  const original=epic('long',FIXED_NOW,true);
+  original.promotions.promotionalOffers[0].promotionalOffers[0].endDate=new Date(FIXED_NOW+65*86400000).toISOString();
+  const state={gp:[],epic:[original]},posts=[];const restore=mockNetwork(()=>state,posts);
+  try {
+    const env={DB:db,DISCORD_BOT_TOKEN:'t'};
+    await freeCron(env,FIXED_NOW);
+    await freeCron(env,FIXED_NOW+31*86400000);
+    await freeCron(env,FIXED_NOW+32*86400000);
+    assert.equal(posts.length,1);
+    assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM free_deliveries WHERE status='sent'").get().n,1);
   } finally {restore();}
 });
 
