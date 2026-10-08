@@ -1,0 +1,18 @@
+{
+  "name": "discord-steam-reminder-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord Steam search, member info and timed events bot on Cloudflare Workers and D1",
+  "engines": { "node": ">=20" },
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "register": "node scripts/register-commands.js",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute discord-reminders --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
