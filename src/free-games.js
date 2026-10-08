@@ -163,7 +163,17 @@ function makeEmbed(offer, theme = 'rich') {
   if (theme === 'rich' && offer.image_url) embed.image = { url: offer.image_url };
   return embed;
 }
+const MAJOR_STORES = new Set(['steam', 'epic', 'gog']);
 function makePost(offer, setting, preview = false) {
+  if (!MAJOR_STORES.has(offer.store)) {
+    const name = text(offer.title, 160);
+    const store = offer.store === 'itch' ? 'itch.io' : 'Cửa hàng khác';
+    const label = offer.phase === 'upcoming' ? 'Sắp miễn phí' : 'Miễn phí';
+    return {
+      content: `${label}: **${name}** (${store})\n${offer.claim_url}`,
+      allowed_mentions: noMentions
+    };
+  }
   const role = !preview && /^\d{17,22}$/.test(String(setting?.role_id || '')) ? String(setting.role_id) : null;
   const payload = {
     content: preview ? '🔎 **Kiểm tra thông báo game miễn phí**' : (role ? `<@&${role}>` : ''),
